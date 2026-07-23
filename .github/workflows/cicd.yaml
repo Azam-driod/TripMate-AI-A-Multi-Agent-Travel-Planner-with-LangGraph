@@ -2,18 +2,27 @@ name: TripMate CI/CD Pipeline
 
 on:
   push:
-    branches: [ "main" ]
+    branches:
+      - main
+      - develop
+
   pull_request:
-    branches: [ "main" ]
+    branches:
+      - main
+
+env:
+  IMAGE_NAME: tripmate-ai-agent
 
 jobs:
-  # -------------------------
+
+  ##############################################
   # Continuous Integration
-  # -------------------------
-  build-and-test:
+  ##############################################
+  ci:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout repository
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -21,59 +30,85 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run tests
-        run: pytest --maxfail=1 --disable-warnings -q
+      - name: Lint
+        continue-on-error: true
+        run: |
+          pip install flake8
+          flake8 . --count --statistics --max-line-length=120
 
-  # -------------------------
+      - name: Run Tests
+        run: |
+          pip install pytest
+          pytest
+
+      - name: Build Docker Image
+        run: |
+          docker build -t $IMAGE_NAME .
+
+  ##############################################
   # Continuous Deployment
-  # -------------------------
-  deploy:
-    needs: build-and-test
-    runs-on: ubuntu-latest
+  ##############################################
+  cd:
+    needs: ci
+
     if: github.ref == 'refs/heads/main'
+
+    runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout repository
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
         with:
-          python-version: "3.11"
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Install dependencies
+      - name: Build Docker Image
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          docker build \
+            -t ${{ secrets.DOCKERHUB_USERNAME }}/tripmate-ai-agent:latest .
 
-      - name: Configure environment variables
+      - name: Push Docker Image
         run: |
-          echo "GROQ_API_KEY=${{ secrets.GROQ_API_KEY }}" >> $GITHUB_ENV
-          echo "TAVILY_API_KEY=${{ secrets.TAVILY_API_KEY }}" >> $GITHUB_ENV
-          echo "AVIATIONSTACK_API_KEY=${{ secrets.AVIATIONSTACK_API_KEY }}" >> $GITHUB_ENV
-          echo "LANGSMITH_API_KEY=${{ secrets.LANGSMITH_API_KEY }}" >> $GITHUB_ENV
+          docker push \
+            ${{ secrets.DOCKERHUB_USERNAME }}/tripmate-ai-agent:latest
 
-      # -------------------------
-      # AWS Deployment
-      # -------------------------
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+      - name: Deploy to Server
+        uses: appleboy/ssh-action@v1.2.0
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
 
-      - name: Deploy to AWS EC2
-        run: |
-          # Example: SSH into EC2 and deploy
-          ssh -o StrictHostKeyChecking=no ec2-user@${{ secrets.AWS_EC2_HOST }} << 'EOF'
-          cd /home/ec2-user/tripmate
-          git pull origin main
-          source venv/bin/activate
-          pip install -r requirements.txt
-          systemctl restart tripmate.service
-          EOF
+          script: |
+            docker pull ${{ secrets.DOCKERHUB_USERNAME }}/tripmate-ai-agent:latest
+
+            docker stop tripmate || true
+            docker rm tripmate || true
+
+            docker run -d \
+              --name tripmate \
+              --restart unless-stopped \
+              -p 80:8000 \
+              -e GROQ_API_KEY="${{ secrets.GROQ_API_KEY }}" \
+              -e TAVILY_API_KEY="${{ secrets.TAVILY_API_KEY }}" \
+              -e AVIATIONSTACK_API_KEY="${{ secrets.AVIATIONSTACK_API_KEY }}" \
+              -e LANGCHAIN_API_KEY="${{ secrets.LANGCHAIN_API_KEY }}" \
+              -e LANGCHAIN_TRACING_V2="true" \
+              -e LANGCHAIN_PROJECT="TripMate" \
+              ${{ secrets.DOCKERHUB_USERNAME }}/tripmate-ai-agent:latest
