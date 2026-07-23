@@ -44,6 +44,7 @@ jobs:
 
       - name: Lint Code
         run: |
+         ruff check --ignore F401.
           # Stop build if there are syntax errors or undefined names
           ruff check .
 
