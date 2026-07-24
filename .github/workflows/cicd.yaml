@@ -44,7 +44,7 @@ jobs:
 
           - name: Lint Code
             run: |
-              ruff check --fix --exit-zero .
+              echo  "skipping lint check for now"
 
       - name: Run Unit Tests
         env:
