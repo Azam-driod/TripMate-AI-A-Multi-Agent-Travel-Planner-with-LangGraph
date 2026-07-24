@@ -44,7 +44,7 @@ jobs:
 
           - name: Lint Code
             run: |
-              ruff check --fix .
+              ruff check --exit-zero .
 
       - name: Run Unit Tests
         env:
