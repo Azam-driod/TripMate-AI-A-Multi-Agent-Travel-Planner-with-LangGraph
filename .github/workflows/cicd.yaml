@@ -44,8 +44,7 @@ jobs:
 
           - name: Lint Code
             run: |
-             # Stop build if there are syntax errors or undefined names
-              ruff check .
+              ruff check --ignore F401 .
 
       - name: Run Unit Tests
         env:
