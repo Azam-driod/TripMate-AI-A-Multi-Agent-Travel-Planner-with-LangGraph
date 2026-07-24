@@ -44,7 +44,7 @@ jobs:
 
           - name: Lint Code
             run: |
-              ruff check --ignore F401 .
+              ruff check --fix .
 
       - name: Run Unit Tests
         env:
