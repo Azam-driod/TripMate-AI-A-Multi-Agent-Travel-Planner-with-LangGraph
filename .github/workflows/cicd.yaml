@@ -15,7 +15,7 @@ env:
   ECR_REPOSITORY: tripmate                 # Change to your Amazon ECR repository name
   ECS_SERVICE: tripmate-service            # Change to your ECS service name
   ECS_CLUSTER: tripmate-cluster            # Change to your ECS cluster name
-  ECS_TASK_DEFINITION: .aws/task-def.json  # Path to your ECS task definition JSON file
+  ECS_TASK_DEFINITION: ecs/task-definition.json  # Path to your ECS task definition JSON file
   CONTAINER_NAME: tripmate                 # Container name in your ECS task definition
 
 jobs:
