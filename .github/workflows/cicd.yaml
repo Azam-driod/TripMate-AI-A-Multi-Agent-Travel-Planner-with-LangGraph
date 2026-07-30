@@ -13,9 +13,9 @@ permissions:
 env:
   AWS_REGION: us-east-1                    # Change to your AWS Region
   ECR_REPOSITORY: tripmate                 # Change to your Amazon ECR repository name
-  ECS_SERVICE: tripmate-service            # Change to your ECS service name
-  ECS_CLUSTER: tripmate-cluster            # Change to your ECS cluster name
-  ECS_TASK_DEFINITION: ecs/task-definition.json  # Path to your ECS task definition JSON file
+  ECR_SERVICE: tripmate-service            # Change to your ECS service name
+  ECR_CLUSTER: tripmate-cluster            # Change to your ECS cluster name
+  #ECS_TASK_DEFINITION: ecs/task-definition.json  # Path to your ECS task definition JSON file
   CONTAINER_NAME: tripmate                 # Container name in your ECS task definition
 
 jobs:
@@ -100,18 +100,18 @@ jobs:
           
           echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
 
-      - name: Fill in the new Image ID in the Amazon ECS Task Definition
+      - name: Fill in the new Image ID in the Amazon ECR Task Definition
         id: task-def
-        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        uses: aws-actions/amazon-ecr-render-task-definition@v1
         with:
-          task-definition: ${{ env.ECS_TASK_DEFINITION }}
+          #task-definition: ${{ env.ECS_TASK_DEFINITION }}
           container-name: ${{ env.CONTAINER_NAME }}
           image: ${{ steps.build-image.outputs.image }}
 
-      - name: Deploy Amazon ECS Task Definition
-        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+      - name: Deploy Amazon ECR Task Definition
+        uses: aws-actions/amazon-ecr-deploy-task-definition@v2
         with:
           task-definition: ${{ steps.task-def.outputs.task-definition }}
-          service: ${{ env.ECS_SERVICE }}
-          cluster: ${{ env.ECS_CLUSTER }}
+          service: ${{ env.ECR_SERVICE }}
+          cluster: ${{ env.ECR_CLUSTER }}
           wait-for-service-stability: true
