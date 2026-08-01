@@ -4,46 +4,31 @@ on:
   push:
     branches:
       - main
-      - master
   pull_request:
     branches:
       - main
-      - master
 
 env:
   AWS_REGION: us-east-1
   ECR_REPOSITORY: tripmate
-  ECS_CLUSTER: tripmate-cluster
-  ECS_SERVICE: tripmate-service
-  CONTAINER_NAME: tripmate
+  IMAGE_TAG: ${{ github.sha }}
 
 jobs:
-
-  #############################
+  ##############################
   # Continuous Integration
-  #############################
-
+  ##############################
   ci:
     name: Build & Test
     runs-on: ubuntu-latest
 
     steps:
-
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
-      - name: Cache dependencies
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
 
       - name: Install Dependencies
         run: |
@@ -54,35 +39,33 @@ jobs:
         run: |
           pytest
 
-      - name: Lint Code
+      - name: Run Linter
         run: |
           pip install flake8
           flake8 .
 
       - name: Build Docker Image
         run: |
-          docker build -t tripmate .
+          docker build -t tripmate:${{ env.IMAGE_TAG }} .
 
-  #############################
+  ##############################
   # Continuous Deployment
-  #############################
-
-  cd:
-    name: Deploy to AWS
+  ##############################
+  deploy:
+    name: Push to ECR & Deploy to EC2
     needs: ci
 
     if: github.ref == 'refs/heads/main'
 
     runs-on: ubuntu-latest
 
-    permissions:
-      id-token: write
-      contents: read
-
     steps:
-
       - name: Checkout Repository
         uses: actions/checkout@v4
+
+      #################################
+      # Configure AWS
+      #################################
 
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -91,53 +74,88 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
+      #################################
+      # Login to Amazon ECR
+      #################################
+
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
+      #################################
+      # Build Docker Image
+      #################################
+
       - name: Build Docker Image
         run: |
           docker build \
-          -t ${{ env.ECR_REPOSITORY }}:${{ github.sha }} \
-          -t ${{ env.ECR_REPOSITORY }}:latest .
+            -t ${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }} \
+            -t ${{ env.ECR_REPOSITORY }}:latest .
+
+      #################################
+      # Tag Docker Image
+      #################################
 
       - name: Tag Docker Image
         run: |
-          docker tag ${{ env.ECR_REPOSITORY }}:${{ github.sha }} \
-          ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+          docker tag ${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }} \
+          ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
 
           docker tag ${{ env.ECR_REPOSITORY }}:latest \
           ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
 
-      - name: Push Docker Images
+      #################################
+      # Push Docker Image
+      #################################
+
+      - name: Push Docker Image
         run: |
-          docker push ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+          docker push ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
           docker push ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
 
-      - name: Download ECS Task Definition
-        run: |
-          aws ecs describe-task-definition \
-          --task-definition tripmate-task \
-          --query taskDefinition \
-          > task-definition.json
+      #################################
+      # Deploy to EC2
+      #################################
 
-      - name: Render ECS Task Definition
-        id: task-def
-        uses: aws-actions/amazon-ecs-render-task-definition@v1
+      - name: Deploy on EC2
+        uses: appleboy/ssh-action@v1.0.3
         with:
-          task-definition: task-definition.json
-          container-name: ${{ env.CONTAINER_NAME }}
-          image: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
-        env:
-          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          AVIATIONSTACK_API_KEY: ${{ secrets.AVIATIONSTACK_API_KEY }}
-          LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY }}
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
 
-      - name: Deploy to Amazon ECS
-        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
-        with:
-          task-definition: ${{ steps.task-def.outputs.task-definition }}
-          cluster: ${{ env.ECS_CLUSTER }}
-          service: ${{ env.ECS_SERVICE }}
-          wait-for-service-stability: true
+          script: |
+
+            echo "Logging into Amazon ECR..."
+
+            aws ecr get-login-password \
+            --region us-east-1 | docker login \
+            --username AWS \
+            --password-stdin <AWS_ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com
+
+            echo "Pulling latest image..."
+
+            docker pull <AWS_ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/tripmate:latest
+
+            echo "Stopping existing container..."
+
+            docker stop tripmate || true
+            docker rm tripmate || true
+
+            echo "Removing unused images..."
+
+            docker image prune -af
+
+            echo "Starting TripMate..."
+
+            docker run -d \
+              --name tripmate \
+              --restart always \
+              -p 8000:8000 \
+              -e GROQ_API_KEY="${{ secrets.GROQ_API_KEY }}" \
+              -e TAVILY_API_KEY="${{ secrets.TAVILY_API_KEY }}" \
+              -e AVIATIONSTACK_API_KEY="${{ secrets.AVIATIONSTACK_API_KEY }}" \
+              -e LANGSMITH_API_KEY="${{ secrets.LANGSMITH_API_KEY }}" \
+              <AWS_ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/tripmate:latest
+
+            docker ps
