@@ -1,72 +1,87 @@
-name: Tripmate CI/CD Pipeline
+name: TripMate CI/CD Pipeline
 
 on:
   push:
-    branches: [ "main" ]
+    branches:
+      - main
+      - master
   pull_request:
-    branches: [ "main" ]
-
-permissions:
-  id-token: write   # Required for AWS OIDC authentication
-  contents: read
+    branches:
+      - main
+      - master
 
 env:
-  AWS_REGION: us-east-1                    # Change to your AWS Region
-  ECR_REPOSITORY: tripmate                 # Change to your Amazon ECR repository name
-  ECR_SERVICE: tripmate-service            # Change to your ECS service name
-  ECR_CLUSTER: tripmate-cluster            # Change to your ECS cluster name
-  #ECS_TASK_DEFINITION: ecs/task-definition.json  # Path to your ECS task definition JSON file
-  CONTAINER_NAME: tripmate                 # Container name in your ECS task definition
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: tripmate
+  ECS_CLUSTER: tripmate-cluster
+  ECS_SERVICE: tripmate-service
+  CONTAINER_NAME: tripmate
 
 jobs:
-  # =========================================================
-  # STAGE 1: Continuous Integration (CI)
-  # =========================================================
+
+  #############################
+  # Continuous Integration
+  #############################
+
   ci:
-    name: Continuous Integration (Lint & Test)
+    name: Build & Test
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Code
+
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip"
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
 
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          pip install pytest ruff
+          pip install -r requirements.txt
+
+      - name: Run Unit Tests
+        run: |
+          pytest
 
       - name: Lint Code
         run: |
-          echo "Bypassing ruff linting"
+          pip install flake8
+          flake8 .
 
-      - name: Run Unit Tests
-        env:
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
-          AVIATION_STACK_KEY: ${{ secrets.AVIATION_STACK_KEY }}
-          LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY }}
+      - name: Build Docker Image
         run: |
-          # Allow tests to fail without breaking the pipeline for now
-          pytest || true
-          
-  # =========================================================
-  # STAGE 2: Continuous Deployment (CD)
-  # =========================================================
+          docker build -t tripmate .
+
+  #############################
+  # Continuous Deployment
+  #############################
+
   cd:
-    name: Continuous Deployment (Build & Deploy to AWS)
+    name: Deploy to AWS
     needs: ci
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    if: github.ref == 'refs/heads/main'
+
     runs-on: ubuntu-latest
 
+    permissions:
+      id-token: write
+      contents: read
+
     steps:
-      - name: Checkout Code
+
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
       - name: Configure AWS Credentials
@@ -76,42 +91,53 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Log in to Amazon ECR
+      - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build, Tag, and Push Docker Image to ECR
-        id: build-image
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          IMAGE_TAG: ${{ github.sha }}
+      - name: Build Docker Image
         run: |
-          # Build image with build-time environment variables if needed
           docker build \
-            --build-arg GROQ_API_KEY="${{ secrets.GROQ_API_KEY }}" \
-            --build-arg TAVILY_API_KEY="${{ secrets.TAVILY_API_KEY }}" \
-            --build-arg AVIATION_STACK_KEY="${{ secrets.AVIATION_STACK_KEY }}" \
-            --build-arg LANGSMITH_API_KEY="${{ secrets.LANGSMITH_API_KEY }}" \
-            -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
-            -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
-          
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
-          
-          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+          -t ${{ env.ECR_REPOSITORY }}:${{ github.sha }} \
+          -t ${{ env.ECR_REPOSITORY }}:latest .
 
-      - name: Fill in the new Image ID in the Amazon ECR Task Definition
+      - name: Tag Docker Image
+        run: |
+          docker tag ${{ env.ECR_REPOSITORY }}:${{ github.sha }} \
+          ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+
+          docker tag ${{ env.ECR_REPOSITORY }}:latest \
+          ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+
+      - name: Push Docker Images
+        run: |
+          docker push ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+          docker push ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+
+      - name: Download ECS Task Definition
+        run: |
+          aws ecs describe-task-definition \
+          --task-definition tripmate-task \
+          --query taskDefinition \
+          > task-definition.json
+
+      - name: Render ECS Task Definition
         id: task-def
-        uses: aws-actions/amazon-ecr-render-task-definition@v1
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
         with:
-          #task-definition: ${{ env.ECS_TASK_DEFINITION }}
+          task-definition: task-definition.json
           container-name: ${{ env.CONTAINER_NAME }}
-          image: ${{ steps.build-image.outputs.image }}
+          image: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+        env:
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          AVIATIONSTACK_API_KEY: ${{ secrets.AVIATIONSTACK_API_KEY }}
+          LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY }}
 
-      - name: Deploy Amazon ECR Task Definition
-        uses: aws-actions/amazon-ecr-deploy-task-definition@v2
+      - name: Deploy to Amazon ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
         with:
           task-definition: ${{ steps.task-def.outputs.task-definition }}
-          service: ${{ env.ECR_SERVICE }}
-          cluster: ${{ env.ECR_CLUSTER }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          service: ${{ env.ECS_SERVICE }}
           wait-for-service-stability: true
